@@ -16,7 +16,7 @@ export const config = {
     baseUrl: env("ROUTERAI_BASE_URL", "https://routerai.ru/api/v1"),
     validationModel: env(
       "ROUTERAI_VALIDATION_MODEL",
-      "google/gemini-2.0-flash-001",
+      "google/gemini-2.5-flash-image",
     ),
     generationModel: env(
       "ROUTERAI_GENERATION_MODEL",
