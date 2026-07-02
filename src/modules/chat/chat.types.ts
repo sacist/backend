@@ -15,6 +15,6 @@ export type ProcessChatInput = {
 }
 
 export type ProcessChatResult = {
-  jpg: Buffer
-  headers: Record<string, string>
+  text: string
+  image: Buffer | null
 }

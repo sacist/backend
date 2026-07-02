@@ -1,4 +1,3 @@
-import { ensureJpeg, renderLookJpg } from "../../helpers/image.helper.js"
 import {
   generateDressedImage,
   isConfigured as isAiConfigured,
@@ -27,25 +26,15 @@ const parseMessages = (raw: unknown): Msg[] => {
   }
 }
 
-const buildAiReply = (
-  text: string,
-  attached: number,
-  historyLen: number,
-): string => {
-  if (text.trim().length === 0 && attached === 0) {
-    return "Расскажите подробнее, какой образ вы хотите подобрать."
+const findLastReference = (history: Msg[]): string | null => {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i]
+    if (m && m.role === "user" && m.imageSrc && m.text?.startsWith("Референс:")) {
+      return m.text
+    }
   }
-  return `Принял запрос: "${text || "(без текста)"}". Учёл ${attached} фото и ${historyLen} предыдущих сообщений.`
+  return null
 }
-
-const buildFallbackReply = (
-  text: string,
-  attached: number,
-  historyLen: number,
-): string =>
-  attached > 0
-    ? `AI не настроен (ROUTERAI_API_KEY). Получил ${attached} фото, запрос: "${text || "(без текста)"}".`
-    : buildAiReply(text, attached, historyLen)
 
 const aiFlow = async (
   text: string,
@@ -60,60 +49,43 @@ const aiFlow = async (
   const validation = await validatePhoto(first)
   if (!validation.ok) {
     const reason = validation.reason || "фото не подходит для примерки"
-    const reply = `Фото не подходит: ${reason}. Загрузите фото человека по пояс или в полный рост, в хорошем качестве и нормальной позе.`
-    const jpg = await renderLookJpg(text, files.length, "Фото не подходит")
     return {
-      jpg,
-      headers: {
-        "X-Assistant-Text": encodeURIComponent(reply),
-        "X-Attached-Count": String(files.length),
-        "X-History-Length": String(history.length),
-        "X-Validation-Error": "1",
-      },
+      text: `Фото не подходит: ${reason}. Загрузите фото человека по пояс или в полный рост, в хорошем качестве и нормальной позе.`,
+      image: null,
     }
   }
 
-  const result = await generateDressedImage(first, text)
-  const jpg = result.imageBuffer
-    ? await ensureJpeg(result.imageBuffer)
-    : await renderLookJpg(text, files.length, "AI не вернул изображение")
-  const reply =
-    result.text.trim() ||
-    `Готово! Запрос: "${text || "(без текста)"}".`
-
-  return {
-    jpg,
-    headers: {
-      "X-Assistant-Text": encodeURIComponent(reply),
-      "X-Attached-Count": String(files.length),
-      "X-History-Length": String(history.length),
-    },
+  const result = await generateDressedImage(
+    first,
+    text,
+    findLastReference(history) ?? undefined,
+  )
+  if (!result.imageBuffer) {
+    return { text: "Ошибка генерации картинки", image: null }
   }
-}
 
-const placeholderFlow = async (
-  text: string,
-  history: Msg[],
-  files: Express.Multer.File[],
-): Promise<ProcessChatResult> => {
-  const reply = buildFallbackReply(text, files.length, history.length)
-  const jpg = await renderLookJpg(text, files.length)
-  return {
-    jpg,
-    headers: {
-      "X-Assistant-Text": encodeURIComponent(reply),
-      "X-Attached-Count": String(files.length),
-      "X-History-Length": String(history.length),
-    },
-  }
+  const reply = result.text.trim() || `Готово! Запрос: "${text || "(без текста)"}".`
+  return { text: reply, image: result.imageBuffer }
 }
 
 export const chatService = {
   async process(input: ProcessChatInput): Promise<ProcessChatResult> {
     const history = parseMessages(input.rawMessages)
-    if (input.files.length > 0 && isAiConfigured()) {
-      return aiFlow(input.text, history, input.files)
+
+    if (input.files.length === 0) {
+      return {
+        text: "Пришлите фотографию для генерации контента",
+        image: null,
+      }
     }
-    return placeholderFlow(input.text, history, input.files)
+
+    if (!isAiConfigured()) {
+      return {
+        text: `AI не настроен (ROUTERAI_API_KEY). Получил ${input.files.length} фото, запрос: "${input.text || "(без текста)"}".`,
+        image: null,
+      }
+    }
+
+    return aiFlow(input.text, history, input.files)
   },
 }

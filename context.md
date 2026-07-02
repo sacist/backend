@@ -12,19 +12,21 @@ LookMAX — ИИ-стилист. Next.js фронт + Express бэкенд, ге
 src/
   index.ts                entry: dotenv + app.listen + SIGINT/SIGTERM shutdown
   app.ts                  Express: helmet/cors/morgan, /health, /api, errorsMiddleware
-  config/env.ts           все env vars (config.routerai.*, port, host, corsOrigin, ...)
+  config/
+    env.ts                все env vars (config.routerai.*, port, host, corsOrigin, ...)
+    fetch-routerai.ts     RouterAI HTTP: listModels, chatCompletions, generateImage
   errors/app-error.ts     AppError { statusCode, code, text }
   middlewares/
     errors.middleware.ts       errorsMiddleware: ErrorRequestHandler
     upload.middleware.ts       multer.memoryStorage + fileFilter (jpeg/png/webp/gif)
-  helpers/image.helper.ts escapeXml, buildLookSvg, renderLookJpg, ensureJpeg (sharp)
   services/
-    routerai.service.ts   isConfigured, validatePhoto, generateDressedImage
+    api.service.ts        универсальный apiRequest<T>({baseUrl, apiKey, path, method, body})
+    routerai.service.ts   isConfigured, validatePhoto, generateDressedImage (бизнес-логика)
   modules/chat/
     chat.types.ts         Role, Msg, ProcessChatInput, ProcessChatResult
     chat.service.ts       chatService.process({text, rawMessages, files})
     chat.controller.ts    class ChatController { handle = async }, chatRouter
-tmp/                      временные JPG, удаляются на res.finish/res.close
+  test-routerai.ts        standalone smoke-test ключа (npm run test:routerai)
 uploads/                  НЕ используется (multer держит файл в памяти)
 ```
 
@@ -46,21 +48,51 @@ uploads/                  НЕ используется (multer держит ф�
 - `messages` (string) — JSON-stringified `Msg[]` (предыдущие сообщения)
 - `files` (File[]) — изображения, до 8 штук, до 10MB каждый
 
-**Response:** `image/jpeg` (бинарный)
-- `X-Assistant-Text` (url-encoded) — текст ответа
-- `X-Attached-Count`, `X-History-Length` — мета
-- `X-Validation-Error: 1` — если фото не подошло
-- `Content-Disposition: inline; filename="look.jpg"`
+**Response:** `application/json`
+```json
+{ "text": "string", "image": "base64-jpg-or-null" }
+```
+- `text` — всегда есть, идёт в чат
+- `image` — `null` если генерация не удалась / валидация не прошла / нет файлов; иначе base64-jpg (data URL собирается на фронте как `data:image/jpeg;base64,...`)
+
+Никаких `X-Assistant-Text` хедеров, никакого `tmp/` на диске, никаких плейсхолдеров. Фронт сам решает показать ли картинку.
+
+**Текст при ошибках:**
+- `Пришлите фотографию для генерации контента` — текстовый запрос без фото (заглушка)
+- `Ошибка генерации картинки` — AI вернул ответ без `b64_json`
+- `Фото не подходит: {reason}. ...` — Gemini-валидатор зарезал фото
+- `AI не настроен (ROUTERAI_API_KEY)...` — нет ключа (env не заполнен)
 
 ## AI flow (когда есть файлы + `ROUTERAI_API_KEY`)
 
-В `services/routerai.service.ts`:
+Трёхслойная архитектура HTTP-вызовов:
 
-1. **Валидация** → `POST {BASE}/chat/completions` с `model: google/gemini-2.0-flash-001` (дешёвая, vision). Промпт просит JSON `{"ok": bool, "reason": "..."}`. Если `ok=false` → возвращаем placeholder + `X-Validation-Error: 1`.
+```
+chat.service
+  └─ routerai.service        (бизнес-логика: промпты, парсинг, fallback)
+       └─ config/fetch-routerai  (RouterAI-специфичные эндпоинты)
+            └─ services/api.service  (универсальный HTTP-клиент)
+```
 
-2. **Генерация** → `POST {BASE}/images` с `model: openai/gpt-image-1-mini` (дешёвая image-to-image, до 16 референсов). Body: `{model, prompt, input_references: [{type: "image_url", image_url: {url: dataUrl}}]}`. Ответ: `{data: [{b64_json: "..."}]}` → Buffer → `sharp().jpeg()`.
+**`api.service.ts`** — `apiRequest<T>({baseUrl, apiKey, path, method, body, headers})`:
+добавляет `Authorization: Bearer`, JSON-сериализацию, бросает `API {method} {url} -> {status}: {body}` на не-2xx.
 
-Без файлов или без ключа — fallback на SVG-плейсхолдер.
+**`config/fetch-routerai.ts`** — три функции над `apiRequest`:
+- `listModels()` → `GET /models`
+- `chatCompletions(model, messages, extra?)` → `POST /chat/completions`
+- `generateImage(model, prompt, dataUrls[])` → `POST /images` (сам собирает `input_references`)
+
+Wire-типы `ChatResponse` / `ImagesResponse` / `ChatMessage` лежат там же.
+
+**`routerai.service.ts`** — бизнес-логика:
+
+1. **Валидация** → `chatCompletions(google/gemini-2.0-flash-001, ...)`. Промпт просит JSON `{"ok": bool, "reason": "..."}`. Если `ok=false` → сервис возвращает текст ошибки без `image`.
+
+2. **Генерация** → `generateImage(openai/gpt-image-1-mini, fullPrompt, [dataUrl])`. Ответ: `{data: [{b64_json: "..."}]}` → Buffer → `sharp().jpeg()` для нормализации формата. Если `b64_json` нет → возвращаем текст `Ошибка генерации картинки` без `image`.
+
+Без файлов или без ключа — `chat.service` сразу возвращает текст без `image` (без вызова AI).
+
+Чтобы добавить новый API-сервис: создать `config/fetch-<name>.ts` по образцу + `services/<name>.service.ts` поверх. Универсальный слой не трогать.
 
 ## Env (см. `.env.example`)
 
@@ -83,6 +115,7 @@ cd backend
 cp .env.example .env       # вписать ROUTERAI_API_KEY
 npm install
 npm run dev                # tsx watch src/index.ts
+npm run test:routerai      # smoke-test ключа (POST /chat/completions + лог ответа)
 ```
 
 ## Frontend (`C:\Users\andre\Desktop\shit\frontend`)
@@ -93,8 +126,8 @@ Next.js 15 + React 19 + Tailwind v4. Главная — `app/page.tsx`.
 
 `app/page.tsx`:
 - `API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001"`
-- `send()` шлёт FormData, читает JPG через `res.blob()` → `URL.createObjectURL`
-- `X-Assistant-Text` декодируется из url-encoded
+- `send()` шлёт FormData, парсит JSON `{text, image?}`, при наличии `image` собирает `data:image/jpeg;base64,...` data URL
+- Если `image` нет — сообщение в чате только с текстом
 - 📎 через скрытый `<input type="file" multiple accept="image/*">`
 - Превью над инпутом с × в углу (`removeAttachment`)
 
@@ -102,12 +135,6 @@ Next.js 15 + React 19 + Tailwind v4. Главная — `app/page.tsx`.
 
 ### RouterAI 401 Unauthorized
 API ключ работает для `GET /api/v1/models`, но НЕ для `chat/completions` или `images`. Причина: не пополнен баланс. Зайти на https://routerai.ru/settings/billing и пополнить.
-
-### Два `page.tsx`
-`backend/page.tsx` и `frontend/app/page.tsx` — одна и та же страница. Исторически фронт лежал в `backend/page.tsx`, потом переехал в `frontend/`. Сейчас синхронизируются через `Copy-Item` (SHA256 совпадают). Правишь одну → синхронизируй другую.
-
-### `backend/page.tsx` лежит в `backend/`
-Выглядит странно (бэкенд-папка содержит фронтовый файл), но это исторический факт. Не переносить в `frontend/` без явной просьбы — сломается синхронизация.
 
 ## Что сделано в этой сессии
 
@@ -117,3 +144,6 @@ API ключ работает для `GET /api/v1/models`, но НЕ для `cha
 4. Создан `frontend/app/page.tsx` (Next.js 15 app router)
 5. Восстановлены сломанные конфиги фронта: postcss, next.config, tailwind в deps
 6. Рефакторинг backend под архитектуру `daily_back`: без `;`, arrow functions, layered (index/app/router/controller/service)
+7. Создан `src/test-routerai.ts` (smoke-test API ключа) + npm script `test:routerai`
+8. **Рефакторинг HTTP-слоя на 3 уровня**: `services/api.service.ts` (универсальный) → `config/fetch-routerai.ts` (RouterAI wrapper) → `services/routerai.service.ts` (бизнес-логика). Сырой `fetch()` из routerai.service убран. Готово к добавлению новых API-сервисов по тому же шаблону.
+9. **Удалён SVG/JPG-плейсхолдер** (`src/helpers/image.helper.ts` целиком). API переведён с `image/jpeg` бинарного ответа на `application/json {text, image?}` — фронт парсит JSON, image через data URL. При любой ошибке генерации в чат уходит текст (`Ошибка генерации картинки`, `Фото не подходит: ...`, `AI не настроен...`). Папка `tmp/` и `res.once("finish"/"close")` cleanup больше не нужны. `sharp` остался — используется в `routerai.service` для нормализации формата ответа AI в JPG.

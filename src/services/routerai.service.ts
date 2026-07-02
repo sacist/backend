@@ -1,39 +1,13 @@
+import sharp from "sharp"
 import { config } from "../config/env.js"
-
-type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image_url"; image_url: { url: string } }
-
-type Role = "user" | "assistant" | "system"
-
-type Message = {
-  role: Role
-  content: string | ContentPart[]
-}
-
-type ImageRef = { type: "image_url"; image_url: { url: string } }
-
-type ChatResponse = {
-  choices?: Array<{
-    message?: {
-      role?: string
-      content?: string | ContentPart[] | null
-      images?: ImageRef[]
-    }
-  }>
-}
-
-type ImagesResponse = {
-  data?: Array<{ b64_json?: string }>
-}
+import {
+  chatCompletions,
+  generateImage,
+  type ChatResponse,
+} from "../config/fetch-routerai.js"
 
 export type ValidationResult = { ok: boolean; reason: string }
 export type GenerationResult = { text: string; imageBuffer: Buffer | null }
-
-const authHeaders = (): Record<string, string> => ({
-  Authorization: `Bearer ${config.routerai.apiKey}`,
-  "Content-Type": "application/json",
-})
 
 const fileToDataUrl = (file: Express.Multer.File): string => {
   const mime = file.mimetype || "image/jpeg"
@@ -46,22 +20,12 @@ const dataUrlToBuffer = (url: string): Buffer | null => {
   return Buffer.from(m[1], "base64")
 }
 
-const callChat = async (
-  model: string,
-  messages: Message[],
-  extra: Record<string, unknown> = {},
-): Promise<ChatResponse> => {
-  if (!isConfigured()) throw new Error("ROUTERAI_API_KEY is not set")
-  const res = await fetch(`${config.routerai.baseUrl}/chat/completions`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({ model, messages, ...extra }),
-  })
-  if (!res.ok) {
-    const errText = await res.text()
-    throw new Error(`RouterAI chat ${res.status}: ${errText.slice(0, 400)}`)
+const ensureJpeg = async (input: Buffer): Promise<Buffer> => {
+  try {
+    return await sharp(input).jpeg({ quality: 88, mozjpeg: true }).toBuffer()
+  } catch {
+    return input
   }
-  return (await res.json()) as ChatResponse
 }
 
 const extractTextAndImage = (
@@ -109,7 +73,7 @@ export const validatePhoto = async (
   file: Express.Multer.File,
 ): Promise<ValidationResult> => {
   const dataUrl = fileToDataUrl(file)
-  const res = await callChat(config.routerai.validationModel, [
+  const res = await chatCompletions(config.routerai.validationModel, [
     {
       role: "user",
       content: [
@@ -162,44 +126,35 @@ export const validatePhoto = async (
 export const generateDressedImage = async (
   file: Express.Multer.File,
   prompt: string,
+  referenceText?: string,
 ): Promise<GenerationResult> => {
   const dataUrl = fileToDataUrl(file)
   const userText = prompt.trim() || "стильный современный образ"
-  const fullPrompt = [
-    `Одень этого человека в: ${userText}.`,
+  const lines = [`Одень этого человека в: ${userText}.`]
+  if (referenceText) {
+    lines.push(`Учти стиль из референса: ${referenceText}.`)
+  }
+  lines.push(
     "Сохрани позу, лицо, телосложение, фон и общую композицию.",
     "Замени только одежду и аксессуары.",
     "Сгенерируй фотореалистичное изображение.",
-  ].join("\n")
+  )
+  const fullPrompt = lines.join("\n")
 
   if (!isConfigured()) throw new Error("ROUTERAI_API_KEY is not set")
 
-  const res = await fetch(`${config.routerai.baseUrl}/images`, {
-    method: "POST",
-    headers: authHeaders(),
-    body: JSON.stringify({
-      model: config.routerai.generationModel,
-      prompt: fullPrompt,
-      input_references: [
-        { type: "image_url", image_url: { url: dataUrl } },
-      ],
-    }),
-  })
-
-  if (!res.ok) {
-    const errText = await res.text()
-    throw new Error(`RouterAI images ${res.status}: ${errText.slice(0, 400)}`)
-  }
-
-  const json = (await res.json()) as ImagesResponse
+  const json = await generateImage(
+    config.routerai.generationModel,
+    fullPrompt,
+    [dataUrl],
+  )
   const b64 = json.data?.[0]?.b64_json
   if (!b64) {
-    const summary = JSON.stringify(json).slice(0, 800)
     console.warn(
       `[routerai] no b64_json in /images response (model=${config.routerai.generationModel})`,
-      summary,
+      JSON.stringify(json).slice(0, 800),
     )
-    return { text: "AI не вернул изображение", imageBuffer: null }
+    return { text: "", imageBuffer: null }
   }
-  return { text: "", imageBuffer: Buffer.from(b64, "base64") }
+  return { text: "", imageBuffer: await ensureJpeg(Buffer.from(b64, "base64")) }
 }
