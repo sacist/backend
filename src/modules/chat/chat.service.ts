@@ -1,7 +1,7 @@
 import {
   generateDressedImage,
   isConfigured as isAiConfigured,
-  validatePhoto,
+  validateRequest,
 } from "../../services/routerai.service.js"
 import type {
   Msg,
@@ -46,11 +46,11 @@ const aiFlow = async (
     throw new Error("aiFlow called without files")
   }
 
-  const validation = await validatePhoto(first)
+  const validation = await validateRequest(text, files)
   if (!validation.ok) {
-    const reason = validation.reason || "фото не подходит для примерки"
+    const reason = validation.reason || "запрос не подходит для генерации"
     return {
-      text: `Фото не подходит: ${reason}. Загрузите фото человека по пояс или в полный рост, в хорошем качестве и нормальной позе.`,
+      text: `Не получилось: ${reason}. Опишите стиль одежды (casual, old money, деловой, вечерний и т.п.) и приложите фото человека по пояс или в полный рост — тогда получится сгенерировать образ.`,
       image: null,
     }
   }
@@ -59,6 +59,7 @@ const aiFlow = async (
     first,
     text,
     findLastReference(history) ?? undefined,
+    validation.generationPrompt,
   )
   if (!result.imageBuffer) {
     return { text: "Ошибка генерации картинки", image: null }
