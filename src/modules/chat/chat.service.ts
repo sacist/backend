@@ -68,6 +68,14 @@ const aiFlow = async (
   return { text: reply, image: result.imageBuffer }
 }
 
+const upstreamErrorText = (err: unknown): string => {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/^API\s+\w+\s+https?:\/\/\S+\s+->\s+\d{3}/i.test(msg)) {
+    return "Сервис генерации временно недоступен. Попробуйте ещё раз через минуту."
+  }
+  return "Не удалось обработать запрос. Попробуйте ещё раз."
+}
+
 export const chatService = {
   async process(input: ProcessChatInput): Promise<ProcessChatResult> {
     const history = parseMessages(input.rawMessages)
@@ -86,6 +94,13 @@ export const chatService = {
       }
     }
 
-    return aiFlow(input.text, history, input.files)
+    try {
+      return await aiFlow(input.text, history, input.files)
+    } catch (err) {
+      console.error(
+        `[chat] upstream failure: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      return { text: upstreamErrorText(err), image: null }
+    }
   },
 }

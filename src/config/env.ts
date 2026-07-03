@@ -16,7 +16,7 @@ export const config = {
     baseUrl: env("ROUTERAI_BASE_URL", "https://routerai.ru/api/v1"),
     validationModel: env(
       "ROUTERAI_VALIDATION_MODEL",
-      "google/gemini-2.5-flash-image",
+      "openai/gpt-4o-mini",
     ),
     generationModel: env(
       "ROUTERAI_GENERATION_MODEL",

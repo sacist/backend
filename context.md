@@ -60,8 +60,9 @@ uploads/                  НЕ используется (multer держит ф�
 **Текст при ошибках:**
 - `Пришлите фотографию для генерации контента` — текстовый запрос без фото (заглушка)
 - `Ошибка генерации картинки` — AI вернул ответ без `b64_json`
-- `Фото не подходит: {reason}. ...` — Gemini-валидатор зарезал фото
+- `Фото не подходит: {reason}. ...` — vision-валидатор зарезал фото
 - `AI не настроен (ROUTERAI_API_KEY)...` — нет ключа (env не заполнен)
+- `Сервис генерации временно недоступен. Попробуйте ещё раз через минуту.` — RouterAI вернул 4xx/5xx (любой upstream-сбой ловится в `chatService.process` и возвращается как обычный текст, а не 500)
 
 ## AI flow (когда есть файлы + `ROUTERAI_API_KEY`)
 
@@ -104,7 +105,7 @@ MAX_FILES=8
 CORS_ORIGIN=http://localhost:3000
 ROUTERAI_API_KEY=             # ОБЯЗАТЕЛЬНО пополнить баланс на routerai.ru
 ROUTERAI_BASE_URL=https://routerai.ru/api/v1
-ROUTERAI_VALIDATION_MODEL=google/gemini-2.0-flash-001
+ROUTERAI_VALIDATION_MODEL=openai/gpt-4o-mini
 ROUTERAI_GENERATION_MODEL=openai/gpt-image-1-mini
 ```
 
@@ -136,6 +137,9 @@ Next.js 15 + React 19 + Tailwind v4. Главная — `app/page.tsx`.
 ### RouterAI 401 Unauthorized
 API ключ работает для `GET /api/v1/models`, но НЕ для `chat/completions` или `images`. Причина: не пополнен баланс. Зайти на https://routerai.ru/settings/billing и пополнить.
 
+### RouterAI 503 / "No available providers for model …"
+Модель из `ROUTERAI_VALIDATION_MODEL` не зарегана у RouterAI или не имеет провайдера. Проверить актуальный список: `curl -H "Authorization: Bearer $ROUTERAI_API_KEY" https://routerai.ru/api/v1/models | jq '.data[].id'`. Текущий рабочий default — `openai/gpt-4o-mini` (vision + chat). Альтернативы: `openai/gpt-4o`, `anthropic/claude-3-5-sonnet`, `google/gemini-2.5-flash`.
+
 ## Что сделано в этой сессии
 
 1. Создан backend с нуля: package.json (express, multer 2.x, dotenv, cors, helmet, morgan, sharp, tsx), tsconfig (ESM, strict)
@@ -147,3 +151,5 @@ API ключ работает для `GET /api/v1/models`, но НЕ для `cha
 7. Создан `src/test-routerai.ts` (smoke-test API ключа) + npm script `test:routerai`
 8. **Рефакторинг HTTP-слоя на 3 уровня**: `services/api.service.ts` (универсальный) → `config/fetch-routerai.ts` (RouterAI wrapper) → `services/routerai.service.ts` (бизнес-логика). Сырой `fetch()` из routerai.service убран. Готово к добавлению новых API-сервисов по тому же шаблону.
 9. **Удалён SVG/JPG-плейсхолдер** (`src/helpers/image.helper.ts` целиком). API переведён с `image/jpeg` бинарного ответа на `application/json {text, image?}` — фронт парсит JSON, image через data URL. При любой ошибке генерации в чат уходит текст (`Ошибка генерации картинки`, `Фото не подходит: ...`, `AI не настроен...`). Папка `tmp/` и `res.once("finish"/"close")` cleanup больше не нужны. `sharp` остался — используется в `routerai.service` для нормализации формата ответа AI в JPG.
+10. **Upstream errors больше не → 500**. `chatService.process` оборачивает `aiFlow` в `try/catch`: любой `throw` из `validatePhoto` / `generateDressedImage` (включая `API POST … -> 503` от `apiRequest`) логируется в консоль и возвращается фронту как `{text: "Сервис генерации временно недоступен. Попробуйте ещё раз через минуту.", image: null}`. HTTP-статус остаётся 200, фронт просто показывает текст.
+11. **`ROUTERAI_VALIDATION_MODEL` переключён на `openai/gpt-4o-mini`**. `google/gemini-2.0-flash-001` стал невалидным у RouterAI ("No available providers"), `openai/gpt-image-1-mini` не поддерживает `/chat/completions` с vision (503). `gpt-4o-mini` — дешёвая vision-модель с chat-эндпоинтом. Поменяно в `.env`, `.env.example` и default в `config/env.ts`.
